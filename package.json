@@ -1,0 +1,13 @@
+{
+  "name": "agent-guardrails",
+  "version": "0.1.0",
+  "description": "Three Claude Code hooks that keep coding agents honest.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test hooks/*.test.mjs"
+  }
+}

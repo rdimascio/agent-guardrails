@@ -1,0 +1,20 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "node ~/.claude/guardrails/force-push-guard.mjs" }]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [{ "type": "command", "command": "node ~/.claude/guardrails/evidence-first.mjs" }]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [{ "type": "command", "command": "node ~/.claude/guardrails/claims-need-receipts.mjs" }]
+      }
+    ]
+  }
+}
