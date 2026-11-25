@@ -187,7 +187,6 @@ test('allows plain pushes and allow-listed options', () => {
     'git push -uv origin feat',
     'git push --no-verify --atomic --porcelain origin feat',
     'git -C ../repo push origin feat',
-    'git -c push.default=current push',
     'git push origin HEAD:refs/heads/feat',
     'git fetch && git push origin feat',
   ])
@@ -201,5 +200,65 @@ test('allows the pinned lease with a literal SHA', () => {
 })
 
 test('ignores commands that are not a push', () => {
-  allows(['ls -la', 'git commit -m "no --force here"', "echo 'git push --force'", 'git log --grep=push', 'bun run test'])
+  allows(['ls -la', 'git commit -m "no --force here"', "echo 'git push --force'", 'bun run test', 'git -c alias-free.x=1 status'])
+})
+
+test('treats any word with push or any computed word as a pushing command', () => {
+  denies([
+    'git log --grep=push',
+    'git commit -m "push fix" && git push origin feat',
+    'X=$CMD; git $X origin feat',
+    'git $SUB origin feat',
+    'GIT_CONFIG_GLOBAL=/tmp/evil git $SUB origin feat',
+  ])
+})
+
+test('allows only user.*, color.* and core.quotepath for -c in a command that pushes', () => {
+  allows(['git -c user.name=me -c color.ui=never -c core.quotepath=false push origin feat'])
+  denies([
+    'git -c push.default=current push',
+    'git -c core.sshCommand=evil push origin feat',
+    'git -c url.https://evil/.insteadOf=https://github.com/ push origin feat',
+    'git -c include.path=/tmp/x push origin feat',
+    'git -c core.hooksPath=/tmp/hooks push origin feat',
+  ])
+})
+
+test('denies exec-style options on other git commands in a command that pushes', () => {
+  denies([
+    'git rebase --ex="git status" main && git push origin feat',
+    'git rebase --exe "make" main && git push origin feat',
+    'git rebase -ix make main && git push origin feat',
+    'git difftool -x evil && git push origin feat',
+    'git difftool --extcmd=evil && git push origin feat',
+    'git difftool --extc evil && git push origin feat',
+    'git fetch --upload-pack=evil origin && git push origin feat',
+    'git fetch --upl evil origin && git push origin feat',
+    'git fetch -u evil origin && git push origin feat',
+    'git clone --upload-pack=evil https://example.com/x && git push origin feat',
+    'git ls-remote --upload-pack=evil origin && git push origin feat',
+    'git pull --rec evil && git push origin feat',
+    'git archive --exec=evil --remote=origin HEAD && git push origin feat',
+    'git grep -O foo && git push origin feat',
+    'git grep -Oevil foo && git push origin feat',
+    'git grep --open-files-in-pager=evil foo && git push origin feat',
+    'git grep --open foo && git push origin feat',
+  ])
+})
+
+test('denies risky git config writes and remote add/set-url in any command', () => {
+  denies([
+    'git config remote.origin.mirror true',
+    'git config alias.p "push -f"',
+    'git config --global push.default matching',
+    'git config url.https://evil/.insteadOf https://github.com/',
+    'git config include.path /tmp/x',
+    'git config includeIf.gitdir:~/x.path /tmp/x',
+    'git config core.sshCommand evil',
+    'git config core.hooksPath /tmp/hooks',
+    'git config set alias.p status',
+    'git remote add backup https://example.com/x.git',
+    'git remote set-url origin https://example.com/x.git',
+  ])
+  allows(['git config --get remote.origin.url', 'git config --list', 'git config user.email me@example.com', 'git remote -v'])
 })

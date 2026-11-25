@@ -2,13 +2,17 @@
 
 the hooks i run so coding agents can ship real code without me watching every command. three small Claude Code hooks, plain node, no dependencies.
 
+## scope
+
+- these stop an agent from making an accidental destructive push, or from claiming work it never checked.
+- they're text checks on the command, not a sandbox. a determined caller can get around any text check.
+- pair the force-push guard with branch protection on the server, which is the real backstop.
+
 ## install
 
 1. copy `hooks/` somewhere stable, like `~/.claude/guardrails/`
 2. merge `settings.example.json` into `~/.claude/settings.json` (or a repo's `.claude/settings.json`) and fix the paths
 3. `npm test` to check they run on your node (20+)
-
-these catch honest agent mistakes. they are not a security sandbox, so don't count on them against a caller that's trying to get around them.
 
 ## force-push guard
 
