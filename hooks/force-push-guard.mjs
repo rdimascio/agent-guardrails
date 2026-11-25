@@ -20,7 +20,7 @@ const ALLOWED_LONG_OPTIONS = new Set([
 const ALLOWED_SHORT_FLAGS = new Set(['u', 'n', 'q', 'v'])
 const PINNED_LEASE = /^--force-with-lease=([A-Za-z0-9_./-]+):(.+)$/
 const STRICT_REFSPEC = /^[A-Za-z0-9_./-]+(?::[A-Za-z0-9_./-]+)?$/
-const MENTIONS_PUSH = /push/i
+const PUSH_WORD = /push/i
 
 const GLOBALS_WITHOUT_VALUE = new Set([
   '-p',
@@ -48,8 +48,18 @@ const KNOWN_SUBCOMMANDS = new Set(
     'symbolic-ref tag update-index update-ref var verify-commit verify-tag version whatchanged worktree write-tree maintenance'
   ).split(' '),
 )
-const RISKY_CONFIG_KEY = /^(?:remote|alias|push)\./i
-const REMOTE_WRITES = new Set(['add', 'set-url', 'set-branches', 'set-head', 'rename', 'remove', 'rm', 'prune', 'update'])
+const RISKY_CONFIG_KEY = /^(?:remote\.|alias\.|push\.|url\.|include|core\.sshcommand$|core\.hookspath$)/i
+const CONFIG_READS = new Set(['--get', '--get-all', '--get-regexp', '--get-urlmatch', '--list', '-l', 'get', 'list'])
+const REMOTE_WRITES_ANYWHERE = new Set(['add', 'set-url'])
+const REMOTE_WRITES = new Set(['set-branches', 'set-head', 'rename', 'remove', 'rm', 'prune', 'update'])
+const SAFE_CONFIG_KEY = /^(?:user\.[\w.-]+|color\.[\w.-]+|core\.quotepath)(?:=|$)/i
+const EXEC_LONG_OPTIONS = ['--exec', '--extcmd', '--upload-pack', '--receive-pack', '--open-files-in-pager']
+const MIN_LONG_PREFIX = 3
+const EXEC_SHORT_FLAGS = { rebase: 'x', difftool: 'x', fetch: 'u', pull: 'u', clone: 'u', 'ls-remote': 'u', archive: 'u', grep: 'O' }
+const RUNS_OTHER_COMMANDS = [
+  { sub: 'submodule', arg: 'foreach' },
+  { sub: 'bisect', arg: 'run' },
+]
 
 const COMMAND_WORD = String.raw`(?:^|[\s;&|(])(?:\S*/)?`
 const COMMAND_END = String.raw`(?=$|[\s;&|)<'"])`
@@ -64,7 +74,7 @@ const NESTING = [
   { pattern: /\$\(|`/, why: 'it runs command substitution' },
 ]
 const GIT_CONFIG_ENV = /\bGIT_CONFIG_\w*/
-const GLOBAL_CONFIG_KEY = /^(?:remote|alias)\./i
+const ALIAS_CONFIG_KEY = /^alias\./i
 
 export function splitCommand(command) {
   const segments = []
@@ -163,24 +173,55 @@ function configValues(globals) {
   return values
 }
 
-function invocationProblems(git, mentionsPush) {
-  const problems = []
-  for (const value of configValues(git.globals)) {
-    if (GLOBAL_CONFIG_KEY.test(value)) problems.push(`-c ${value} can change remotes or aliases`)
+function isExecLongOption(arg) {
+  const name = arg.split('=')[0]
+  return name.startsWith('--') && name.length >= MIN_LONG_PREFIX && EXEC_LONG_OPTIONS.some((option) => option.startsWith(name))
+}
+
+function hasExecShortFlag(sub, arg) {
+  const flag = EXEC_SHORT_FLAGS[sub]
+  return flag !== undefined && /^-[a-zA-Z]/.test(arg) && !arg.startsWith('--') && arg.slice(1).includes(flag)
+}
+
+function configWriteProblems(git) {
+  const sub = git.sub?.text ?? ''
+  const args = git.args.map((word) => word.text)
+  if (sub === 'config' && args.some((arg) => RISKY_CONFIG_KEY.test(arg)) && !args.some((arg) => CONFIG_READS.has(arg))) {
+    return ['git config writes a remote, alias, push, url, include, sshCommand or hooksPath setting']
   }
-  if (!mentionsPush) return problems
-  for (const word of [...git.prefix, ...git.globalWords]) {
+  if (sub === 'remote' && args.some((arg) => REMOTE_WRITES_ANYWHERE.has(arg))) return ['git remote add or set-url changes where pushes go']
+  return []
+}
+
+function invocationProblems(git, pushing) {
+  const problems = [...configWriteProblems(git)]
+  const values = configValues(git.globals)
+  for (const value of values) {
+    if (ALIAS_CONFIG_KEY.test(value)) problems.push(`-c ${value} defines an alias`)
+  }
+  if (!pushing) return problems
+  for (const value of values) {
+    if (!SAFE_CONFIG_KEY.test(value)) problems.push(`-c ${value} is not an allowed config key in a command that pushes`)
+  }
+  if (git.globals.some((text) => text.startsWith('--config-env'))) problems.push('--config-env is not allowed in a command that pushes')
+  const words = [...git.prefix, ...git.globalWords, ...(git.sub === null ? [] : [git.sub]), ...git.args]
+  for (const word of words) {
     if (word.computed) problems.push(`${word.text} is computed when the command runs, so the hook cannot check it`)
   }
   const sub = git.sub?.text ?? ''
-  const args = git.args.map((word) => word.text)
   if (git.unknownGlobal) problems.push('git has a global option the hook does not know')
-  if (git.sub !== null && (git.sub.computed || !KNOWN_SUBCOMMANDS.has(sub))) problems.push(`git ${sub} is not a known git command and may be an alias`)
-  if (sub === 'config' && args.some((arg) => RISKY_CONFIG_KEY.test(arg))) problems.push('git config changes remote, alias or push settings in a command that pushes')
+  if (git.sub !== null && !KNOWN_SUBCOMMANDS.has(sub)) problems.push(`git ${sub} is not a known git command and may be an alias`)
+  if (sub === 'push') return problems
+  const args = git.args.map((word) => word.text)
+  if (args.some((arg) => PUSH_WORD.test(arg))) problems.push(`git ${sub} has an argument that mentions push`)
+  if (sub === 'config' && args.some((arg) => RISKY_CONFIG_KEY.test(arg))) problems.push('git config touches remote, alias or push settings in a command that pushes')
   if (sub === 'remote' && args.some((arg) => REMOTE_WRITES.has(arg))) problems.push('git remote changes a remote in a command that pushes')
-  if (sub === 'submodule' && args.includes('foreach')) problems.push('git submodule foreach runs other commands')
-  if (sub === 'rebase' && args.some((arg) => arg === '-x' || arg.startsWith('--exec') || /^-[a-zA-Z]*x/.test(arg))) problems.push('git rebase --exec runs other commands')
-  if (sub === 'bisect' && args.includes('run')) problems.push('git bisect run runs other commands')
+  for (const arg of args) {
+    if (isExecLongOption(arg) || hasExecShortFlag(sub, arg)) problems.push(`git ${sub} ${arg} can run another command`)
+  }
+  for (const rule of RUNS_OTHER_COMMANDS) {
+    if (sub === rule.sub && args.includes(rule.arg)) problems.push(`git ${sub} ${rule.arg} runs other commands`)
+  }
   return problems
 }
 
@@ -201,17 +242,21 @@ function refspecProblem(text) {
 }
 
 function nestingProblems(command) {
-  if (!/git/.test(command) || !/push/.test(command)) return []
-  return NESTING.filter((rule) => rule.pattern.test(command)).map((rule) => `the command mentions git push and ${rule.why}, so the hook cannot see what really runs`)
+  return NESTING.filter((rule) => rule.pattern.test(command)).map((rule) => `the command may push and ${rule.why}, so the hook cannot see what really runs`)
+}
+
+export function isPushing(segments) {
+  return segments.some((words) => words.some((word) => word.computed || PUSH_WORD.test(word.text)))
 }
 
 export function findForcePushes(command) {
-  const mentionsPush = MENTIONS_PUSH.test(command)
-  const problems = [...nestingProblems(command)]
-  const invocations = splitCommand(command).map(gitInvocation).filter((git) => git !== null)
-  if (mentionsPush && invocations.length > 0 && GIT_CONFIG_ENV.test(command)) problems.push('GIT_CONFIG_* variables can change remote or push config for this push')
+  const segments = splitCommand(command)
+  const pushing = isPushing(segments)
+  const problems = pushing ? nestingProblems(command) : []
+  const invocations = segments.map(gitInvocation).filter((git) => git !== null)
+  if (pushing && GIT_CONFIG_ENV.test(command)) problems.push('GIT_CONFIG_* variables can change remote or push config for this push')
   for (const git of invocations) {
-    problems.push(...invocationProblems(git, mentionsPush))
+    problems.push(...invocationProblems(git, pushing))
     if (git.sub?.text !== 'push') continue
     let options = true
     for (const word of git.args) {
@@ -224,7 +269,7 @@ export function findForcePushes(command) {
       if (problem) problems.push(problem)
     }
   }
-  return problems
+  return [...new Set(problems)]
 }
 
 export const HOW_TO_PUSH =
