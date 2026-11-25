@@ -8,10 +8,12 @@ the hooks i run so coding agents can ship real code without me watching every co
 2. merge `settings.example.json` into `~/.claude/settings.json` (or a repo's `.claude/settings.json`) and fix the paths
 3. `npm test` to check they run on your node (20+)
 
+these catch honest agent mistakes. they are not a security sandbox, so don't count on them against a caller that's trying to get around them.
+
 ## force-push guard
 
-`PreToolUse` on Bash. blocks `--force`, `-f`, `+refspec` pushes and a bare `--force-with-lease`.
-the only force push it lets through is `--force-with-lease=<branch>:<sha>` with a sha you typed out yourself. a sha built inside the command with `$(...)` gets blocked too.
+`PreToolUse` on Bash. a push may only use a short list of safe options (`-u`, `--tags`, `--dry-run`, `-q`, `-v`, `--no-verify`, `--atomic`, etc), and plain remote/branch names, so `--force`, `--mirror`, `--prune`, deletes, `+`/`:` refspecs, abbreviations, globs and aliases all get blocked.
+the one force push it allows is `--force-with-lease=<branch>:<sha>` with a sha you typed out, and it fails closed on `$VAR`, `$(...)`, `sh -c`, pipes into a shell, heredocs, `eval`, `xargs` and remote `-c`/`GIT_CONFIG_*` config around a push.
 a bare lease checks against your remote-tracking ref, and any background fetch moves that ref, so it can still eat someone else's commits.
 
 ## evidence first

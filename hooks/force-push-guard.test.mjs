@@ -16,51 +16,190 @@ function decision(command, toolName = 'Bash') {
   return out.trim() ? JSON.parse(out).hookSpecificOutput.permissionDecision : 'allow'
 }
 
-test('denies --force and -f', () => {
+function denies(commands) {
+  for (const command of commands) assert.notDeepEqual(findForcePushes(command), [], `should deny: ${command}`)
+}
+
+function allows(commands) {
+  for (const command of commands) assert.deepEqual(findForcePushes(command), [], `should allow: ${command}`)
+}
+
+test('the hook denies through PreToolUse and ignores other tools', () => {
   assert.equal(decision('git push --force origin feat'), 'deny')
-  assert.equal(decision('git push -f origin feat'), 'deny')
-  assert.equal(decision('git push -uf origin feat'), 'deny')
-})
-
-test('denies a bare --force-with-lease', () => {
-  assert.equal(decision('git push --force-with-lease origin feat'), 'deny')
-  assert.equal(decision('git push --force-with-lease=feat origin feat'), 'deny')
-})
-
-test('denies a lease that is a ref, not a SHA', () => {
-  assert.equal(decision('git push --force-with-lease=feat:origin/feat origin feat'), 'deny')
-})
-
-test('denies a lease SHA computed inside the command', () => {
-  assert.equal(decision('git push --force-with-lease=feat:$(git rev-parse origin/feat) origin feat'), 'deny')
-  assert.equal(decision('git push --force-with-lease=feat:`git rev-parse origin/feat` origin feat'), 'deny')
-  assert.equal(decision('git push --force-with-lease=feat:$SHA origin feat'), 'deny')
-})
-
-test('denies a + refspec', () => {
-  assert.equal(decision('git push origin +feat'), 'deny')
-  assert.equal(decision('git push origin +HEAD:feat'), 'deny')
-})
-
-test('finds a force push later in a chain and behind git options', () => {
-  assert.equal(decision('git fetch && git -C ../repo push --force origin feat'), 'deny')
-  assert.equal(decision('echo hi; git -c push.default=current push -f'), 'deny')
-})
-
-test('allows the pinned form with a literal SHA', () => {
-  assert.equal(decision(`git push --force-with-lease=feat:${SHA} origin feat`), 'allow')
-  assert.equal(decision(`git push --force-with-lease=feat:${SHA.slice(0, 12)} --force-if-includes origin feat`), 'allow')
-})
-
-test('allows normal pushes and other commands', () => {
   assert.equal(decision('git push origin feat'), 'allow')
-  assert.equal(decision('git push -u origin feat'), 'allow')
-  assert.equal(decision('git commit -m "no --force here"'), 'allow')
-  assert.equal(decision("echo 'git push --force'"), 'allow')
   assert.equal(decision('git push --force', 'Edit'), 'allow')
 })
 
-test('explains each problem', () => {
-  assert.equal(findForcePushes('git push --force-with-lease origin feat').length, 1)
-  assert.deepEqual(findForcePushes('ls -la'), [])
+test('denies --force, -f and short flag bundles with f', () => {
+  denies(['git push --force origin feat', 'git push -f origin feat', 'git push -uf origin feat'])
+})
+
+test('denies abbreviated long options', () => {
+  denies(['git push --forc origin feat', 'git push --for origin feat', 'git push --mir origin', 'git push --del origin feat'])
+})
+
+test('denies --mirror, --all, --prune and every form of delete', () => {
+  denies([
+    'git push --mirror origin',
+    'git push --all origin',
+    'git push --prune origin refs/heads/*:refs/heads/*',
+    'git push --delete origin feat',
+    'git push -d origin feat',
+    'git push origin :feat',
+    'git push origin :refs/heads/feat',
+  ])
+})
+
+test('denies options that are not on the allow list', () => {
+  denies(['git push -o ci.skip origin feat', 'git push --push-option=x origin feat', 'git push --receive-pack=/tmp/x origin feat', 'git push --repo=origin'])
+})
+
+test('denies a bare or unpinned --force-with-lease', () => {
+  denies([
+    'git push --force-with-lease origin feat',
+    'git push --force-with-lease=feat origin feat',
+    'git push --force-with-lease=feat:origin/feat origin feat',
+    'git push --force-with-le origin feat',
+  ])
+})
+
+test('denies + refspecs', () => {
+  denies(['git push origin +feat', 'git push origin +HEAD:feat', 'git push origin -- +feat'])
+})
+
+test('denies computed words anywhere in a push', () => {
+  denies([
+    'git push --force-with-lease=feat:$(git rev-parse origin/feat) origin feat',
+    'git push --force-with-lease=feat:`git rev-parse origin/feat` origin feat',
+    'git push --force-with-lease=feat:$SHA origin feat',
+    'F=--force; git push $F origin feat',
+    'git push origin "$BRANCH"',
+    'git push origin ${BRANCH}',
+  ])
+})
+
+test('denies remote config from -c, --config-env and GIT_CONFIG_*', () => {
+  denies([
+    'git -c remote.origin.push=+refs/heads/*:refs/heads/* push origin',
+    'git -c remote.origin.mirror=true push origin',
+    'git -c remote.origin.push=refs/heads/feat:refs/heads/feat push origin',
+    'git --config-env=remote.origin.mirror=MIRROR push origin',
+    'git --config-env remote.origin.push=SPEC push origin',
+    'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=true git push origin',
+    'GIT_CONFIG_PARAMETERS="\'remote.origin.mirror\'=\'true\'" git push origin',
+  ])
+})
+
+test('finds push behind any git global option', () => {
+  denies([
+    'git --attr-source HEAD --super-prefix x/ push -f origin feat',
+    'git --exec-path=/tmp --no-pager push origin +feat',
+    'git --list-cmds=main push --force origin feat',
+    'git -C ../repo push --mirror origin',
+  ])
+})
+
+test('denies nesting around a push even with no force word', () => {
+  denies([
+    'bash -c "git push origin feat"',
+    "sh -c 'git push origin feat'",
+    'zsh -c "git push origin +feat"',
+    'eval "git push origin feat"',
+    'echo "git push origin feat" | sh',
+    'echo "git push origin feat" | /bin/bash',
+    'bash <<EOF\ngit push origin feat\nEOF',
+    'bash <<< "git push origin feat"',
+    'echo feat | xargs git push origin',
+    'echo $(git push origin feat)',
+    'python3 -c "import os; os.system(\'git push origin feat\')"',
+    "node -e \"require('child_process').execSync('git push origin feat')\"",
+    'ruby -e "system(%q(git push origin feat))"',
+  ])
+})
+
+test('denies ANSI-C and locale quoting', () => {
+  denies(["git push $'--force' origin feat", 'git push $"--force" origin feat', "git push origin $'+feat'"])
+})
+
+test('denies brace, glob and tilde expansion in push arguments', () => {
+  denies([
+    'git push {--for,ce} origin feat',
+    'git push --{for,ce} origin feat',
+    'git push origin refs/heads/*:refs/heads/*',
+    'git push origin fea?',
+    'git push origin [f]eat',
+    'git push origin HEAD~1:feat',
+    'git push origin feat:{a,b}',
+  ])
+})
+
+test('denies arguments outside the strict refspec pattern', () => {
+  denies(['git push origin feat@{u}', 'git push origin a:b:c', 'git push origin "feat with space"'])
+})
+
+test('denies unknown subcommands and unknown global options when push is mentioned', () => {
+  denies(['git pushf origin feat', 'git p origin feat # push', 'git --weird-flag push origin feat', 'git fp origin feat && echo push'])
+})
+
+test('denies -c alias.* anywhere', () => {
+  denies(['git -c alias.p="push --force" p origin feat', 'git -c alias.st=status st', 'git --config-env=alias.p=ALIAS p'])
+})
+
+test('denies git config and git remote changes in a command that pushes', () => {
+  denies([
+    'git config remote.origin.mirror true && git push origin',
+    'git config --local remote.origin.push +refs/heads/*:refs/heads/* && git push origin',
+    'git config alias.p "push -f" && git p',
+    'git config push.default matching && git push origin',
+    'git remote add --mirror=push backup https://example.com/x.git && git push backup',
+    'git remote set-url --push origin https://example.com/x.git && git push origin feat',
+  ])
+})
+
+test('denies git commands that run other commands when push is mentioned', () => {
+  denies([
+    'git submodule foreach git push origin feat',
+    'git rebase --exec "git push origin feat" main',
+    'git rebase -x "git push origin feat" main',
+    'git rebase --exec="git push origin feat" main',
+    'git bisect run git push origin feat',
+  ])
+})
+
+test('allows unrelated config and remote reads around a push', () => {
+  allows(['git config user.name && git push origin feat', 'git remote -v && git push origin feat', 'git rebase main && git push origin feat'])
+})
+
+test('finds a push later in a chain', () => {
+  denies(['git fetch && git push --force origin feat', 'echo hi; git push -f', 'true || (git push --mirror origin)'])
+})
+
+test('allows plain pushes and allow-listed options', () => {
+  allows([
+    'git push',
+    'git push origin feat',
+    'git push -u origin feat',
+    'git push --set-upstream origin feat',
+    'git push --tags',
+    'git push --follow-tags origin feat',
+    'git push --dry-run origin feat',
+    'git push -n -q -v origin feat',
+    'git push -uv origin feat',
+    'git push --no-verify --atomic --porcelain origin feat',
+    'git -C ../repo push origin feat',
+    'git -c push.default=current push',
+    'git push origin HEAD:refs/heads/feat',
+    'git fetch && git push origin feat',
+  ])
+})
+
+test('allows the pinned lease with a literal SHA', () => {
+  allows([
+    `git push --force-with-lease=feat:${SHA} origin feat`,
+    `git push --force-with-lease=feat:${SHA.slice(0, 12)} --force-if-includes origin feat`,
+  ])
+})
+
+test('ignores commands that are not a push', () => {
+  allows(['ls -la', 'git commit -m "no --force here"', "echo 'git push --force'", 'git log --grep=push', 'bun run test'])
 })
