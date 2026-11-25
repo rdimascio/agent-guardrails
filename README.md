@@ -12,7 +12,7 @@ these catch honest agent mistakes. they are not a security sandbox, so don't cou
 
 ## force-push guard
 
-`PreToolUse` on Bash. a push may only use a short list of safe options (`-u`, `--tags`, `--dry-run`, `-q`, `-v`, `--no-verify`, `--atomic`, etc), so `--force`, `--mirror`, `--prune`, deletes, `+`/`:` refspecs and abbreviations all get blocked.
+`PreToolUse` on Bash. a push may only use a short list of safe options (`-u`, `--tags`, `--dry-run`, `-q`, `-v`, `--no-verify`, `--atomic`, etc), and plain remote/branch names, so `--force`, `--mirror`, `--prune`, deletes, `+`/`:` refspecs, abbreviations, globs and aliases all get blocked.
 the one force push it allows is `--force-with-lease=<branch>:<sha>` with a sha you typed out, and it fails closed on `$VAR`, `$(...)`, `sh -c`, pipes into a shell, heredocs, `eval`, `xargs` and remote `-c`/`GIT_CONFIG_*` config around a push.
 a bare lease checks against your remote-tracking ref, and any background fetch moves that ref, so it can still eat someone else's commits.
 

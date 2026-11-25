@@ -117,6 +117,59 @@ test('denies nesting around a push even with no force word', () => {
   ])
 })
 
+test('denies ANSI-C and locale quoting', () => {
+  denies(["git push $'--force' origin feat", 'git push $"--force" origin feat', "git push origin $'+feat'"])
+})
+
+test('denies brace, glob and tilde expansion in push arguments', () => {
+  denies([
+    'git push {--for,ce} origin feat',
+    'git push --{for,ce} origin feat',
+    'git push origin refs/heads/*:refs/heads/*',
+    'git push origin fea?',
+    'git push origin [f]eat',
+    'git push origin HEAD~1:feat',
+    'git push origin feat:{a,b}',
+  ])
+})
+
+test('denies arguments outside the strict refspec pattern', () => {
+  denies(['git push origin feat@{u}', 'git push origin a:b:c', 'git push origin "feat with space"'])
+})
+
+test('denies unknown subcommands and unknown global options when push is mentioned', () => {
+  denies(['git pushf origin feat', 'git p origin feat # push', 'git --weird-flag push origin feat', 'git fp origin feat && echo push'])
+})
+
+test('denies -c alias.* anywhere', () => {
+  denies(['git -c alias.p="push --force" p origin feat', 'git -c alias.st=status st', 'git --config-env=alias.p=ALIAS p'])
+})
+
+test('denies git config and git remote changes in a command that pushes', () => {
+  denies([
+    'git config remote.origin.mirror true && git push origin',
+    'git config --local remote.origin.push +refs/heads/*:refs/heads/* && git push origin',
+    'git config alias.p "push -f" && git p',
+    'git config push.default matching && git push origin',
+    'git remote add --mirror=push backup https://example.com/x.git && git push backup',
+    'git remote set-url --push origin https://example.com/x.git && git push origin feat',
+  ])
+})
+
+test('denies git commands that run other commands when push is mentioned', () => {
+  denies([
+    'git submodule foreach git push origin feat',
+    'git rebase --exec "git push origin feat" main',
+    'git rebase -x "git push origin feat" main',
+    'git rebase --exec="git push origin feat" main',
+    'git bisect run git push origin feat',
+  ])
+})
+
+test('allows unrelated config and remote reads around a push', () => {
+  allows(['git config user.name && git push origin feat', 'git remote -v && git push origin feat', 'git rebase main && git push origin feat'])
+})
+
 test('finds a push later in a chain', () => {
   denies(['git fetch && git push --force origin feat', 'echo hi; git push -f', 'true || (git push --mirror origin)'])
 })
