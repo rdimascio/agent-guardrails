@@ -8,9 +8,11 @@ the hooks i run so coding agents can ship real code without me watching every co
 2. merge `settings.example.json` into `~/.claude/settings.json` (or a repo's `.claude/settings.json`) and fix the paths
 3. `npm test` to check they run on your node (20+)
 
+these catch honest agent mistakes. they are not a security sandbox, so don't count on them against a caller that's trying to get around them.
+
 ## force-push guard
 
-`PreToolUse` on Bash. blocks `--force`, `-f`, `+refspec` pushes and a bare `--force-with-lease`.
+`PreToolUse` on Bash. blocks `--force`, `-f`, `+refspec`, `--mirror`, branch deletes and a bare `--force-with-lease`.
 the only force push it lets through is `--force-with-lease=<branch>:<sha>` with a sha you typed out yourself. a sha built inside the command with `$(...)` gets blocked too.
 a bare lease checks against your remote-tracking ref, and any background fetch moves that ref, so it can still eat someone else's commits.
 

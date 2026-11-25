@@ -3,9 +3,15 @@ import { readFileSync } from 'node:fs'
 
 const LITERAL_SHA = /^[0-9a-f]{7,40}$/i
 const SEGMENT_BREAKS = new Set([';', '&', '|', '\n'])
-const GIT_OPTIONS_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace'])
+const HIDDEN_CODE = /\$\(|`|\beval\b|\b(?:sh|bash|zsh|dash|ksh)\s+(?:-\w+\s+)*-\w*c\b/
+const FORCE_INDICATOR = /(?:^|[\s'"])(?:-\w*f\w*|--force|--mirror|--delete)(?=$|[\s'"=;&|)])|(?:^|[\s'"]):?\+[\w/*.@-]|(?:^|[\s'"]):[\w/*.@-]/
+const DANGEROUS_CONFIG = [
+  { pattern: /^remote\..+\.push=\s*\+/i, why: 'a -c remote.*.push value that starts with + is a force push' },
+  { pattern: /^remote\..+\.mirror=\s*(?:true|yes|on|1)\s*$/i, why: 'a -c remote.*.mirror=true push mirrors and can delete remote branches' },
+]
 const LEASE_PREFIX = '--force-with-lease'
 const SHORT_FORCE = /^-[a-zA-Z]*f[a-zA-Z]*$/
+const SHORT_DELETE = /^-[a-zA-Z]*d[a-zA-Z]*$/
 
 export function splitCommand(command) {
   const segments = []
@@ -83,15 +89,30 @@ export function splitCommand(command) {
   return segments
 }
 
-function pushArgs(words) {
-  const gitAt = words.findIndex((w) => w.text === 'git' || w.text.endsWith('/git'))
+function isGitWord(word) {
+  return word.text === 'git' || word.text.endsWith('/git')
+}
+
+function pushInvocation(words) {
+  const gitAt = words.findIndex(isGitWord)
   if (gitAt === -1) return null
-  let i = gitAt + 1
-  while (i < words.length && words[i].text.startsWith('-')) {
-    i += GIT_OPTIONS_WITH_VALUE.has(words[i].text) ? 2 : 1
+  const pushAt = words.findIndex((w, k) => k > gitAt && w.text === 'push')
+  if (pushAt === -1) return null
+  return { globals: words.slice(gitAt + 1, pushAt), args: words.slice(pushAt + 1) }
+}
+
+function configValues(globals) {
+  const values = []
+  for (let k = 0; k < globals.length; k++) {
+    const text = globals[k].text
+    if (text === '-c' && globals[k + 1]) values.push(globals[++k].text)
+    else if (text.startsWith('-c') && text.length > 2) values.push(text.slice(2))
   }
-  if (words[i]?.text !== 'push') return null
-  return words.slice(i + 1)
+  return values
+}
+
+export function hidesForcePush(command) {
+  return /\bgit\b/.test(command) && /\bpush\b/.test(command) && HIDDEN_CODE.test(command) && FORCE_INDICATOR.test(command)
 }
 
 function leaseProblem(word) {
@@ -106,11 +127,17 @@ function leaseProblem(word) {
 
 export function findForcePushes(command) {
   const problems = []
+  if (hidesForcePush(command)) {
+    problems.push('the command runs nested code ($(...), backticks, eval or a shell -c) next to a git push with a force, mirror or delete option, so the hook cannot check it')
+  }
   for (const words of splitCommand(command)) {
-    const args = pushArgs(words)
-    if (args === null) continue
+    const push = pushInvocation(words)
+    if (push === null) continue
+    for (const value of configValues(push.globals)) {
+      for (const rule of DANGEROUS_CONFIG) if (rule.pattern.test(value)) problems.push(rule.why)
+    }
     let options = true
-    for (const word of args) {
+    for (const word of push.args) {
       const text = word.text
       if (options && text === '--') {
         options = false
@@ -120,13 +147,18 @@ export function findForcePushes(command) {
         problems.push(`${text} overwrites the remote branch without checking what is there`)
         continue
       }
+      if (options && (text === '--mirror' || text === '--delete' || SHORT_DELETE.test(text))) {
+        problems.push(`${text} can delete or overwrite remote branches`)
+        continue
+      }
       if (options && text.startsWith(LEASE_PREFIX) && !text.startsWith('--force-with-lease-')) {
         const problem = leaseProblem(word)
         if (problem) problems.push(problem)
         continue
       }
-      if (!text.startsWith('-') && text.startsWith('+')) {
-        problems.push(`the refspec ${text} starts with +, which is a force push`)
+      if (!options || !text.startsWith('-')) {
+        if (text.startsWith('+')) problems.push(`the refspec ${text} starts with +, which is a force push`)
+        else if (text.startsWith(':') && text.length > 1) problems.push(`the refspec ${text} deletes a remote branch`)
       }
     }
   }

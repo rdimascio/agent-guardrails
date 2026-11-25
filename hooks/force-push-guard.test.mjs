@@ -47,6 +47,33 @@ test('finds a force push later in a chain and behind git options', () => {
   assert.equal(decision('echo hi; git -c push.default=current push -f'), 'deny')
 })
 
+test('denies --mirror and deleting pushes', () => {
+  assert.equal(decision('git push --mirror origin'), 'deny')
+  assert.equal(decision('git push --delete origin feat'), 'deny')
+  assert.equal(decision('git push -d origin feat'), 'deny')
+  assert.equal(decision('git push origin :feat'), 'deny')
+})
+
+test('denies -c values that force or mirror', () => {
+  assert.equal(decision('git -c remote.origin.push=+refs/heads/*:refs/heads/* push origin'), 'deny')
+  assert.equal(decision('git -c remote.origin.mirror=true push origin'), 'deny')
+  assert.equal(decision('git -c remote.origin.push=refs/heads/feat:refs/heads/feat push origin'), 'allow')
+})
+
+test('finds push behind any git global option', () => {
+  assert.equal(decision('git --config-env=core.x=Y push --force origin feat'), 'deny')
+  assert.equal(decision('git --attr-source HEAD --super-prefix x/ push -f origin feat'), 'deny')
+  assert.equal(decision('git --exec-path=/tmp --no-pager push origin +feat'), 'deny')
+})
+
+test('fails closed on nested code that hides a force push', () => {
+  assert.equal(decision('bash -c "git push --force origin feat"'), 'deny')
+  assert.equal(decision("sh -c 'git push origin +feat'"), 'deny')
+  assert.equal(decision('eval "git push -f origin feat"'), 'deny')
+  assert.equal(decision('echo $(git push --mirror origin)'), 'deny')
+  assert.equal(decision('bash -c "git push origin feat"'), 'allow')
+})
+
 test('allows the pinned form with a literal SHA', () => {
   assert.equal(decision(`git push --force-with-lease=feat:${SHA} origin feat`), 'allow')
   assert.equal(decision(`git push --force-with-lease=feat:${SHA.slice(0, 12)} --force-if-includes origin feat`), 'allow')
