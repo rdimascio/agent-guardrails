@@ -2,23 +2,45 @@
 import { readFileSync } from 'node:fs'
 
 const LITERAL_SHA = /^[0-9a-f]{7,40}$/i
-const SEGMENT_BREAKS = new Set([';', '&', '|', '\n'])
-const HIDDEN_CODE = /\$\(|`|\beval\b|\b(?:sh|bash|zsh|dash|ksh)\s+(?:-\w+\s+)*-\w*c\b/
-const FORCE_INDICATOR = /(?:^|[\s'"])(?:-\w*f\w*|--force|--mirror|--delete)(?=$|[\s'"=;&|)])|(?:^|[\s'"]):?\+[\w/*.@-]|(?:^|[\s'"]):[\w/*.@-]/
-const DANGEROUS_CONFIG = [
-  { pattern: /^remote\..+\.push=\s*\+/i, why: 'a -c remote.*.push value that starts with + is a force push' },
-  { pattern: /^remote\..+\.mirror=\s*(?:true|yes|on|1)\s*$/i, why: 'a -c remote.*.mirror=true push mirrors and can delete remote branches' },
+const SEGMENT_BREAKS = new Set([';', '&', '|', '\n', '(', ')'])
+const VARIABLE_START = /[A-Za-z_{0-9@*#?!$-]/
+
+const ALLOWED_LONG_OPTIONS = new Set([
+  '--set-upstream',
+  '--tags',
+  '--follow-tags',
+  '--dry-run',
+  '--quiet',
+  '--verbose',
+  '--no-verify',
+  '--porcelain',
+  '--atomic',
+  '--force-if-includes',
+])
+const ALLOWED_SHORT_FLAGS = new Set(['u', 'n', 'q', 'v'])
+const PINNED_LEASE = /^--force-with-lease=([^:]+):(.+)$/
+
+const COMMAND_WORD = String.raw`(?:^|[\s;&|(])(?:\S*/)?`
+const COMMAND_END = String.raw`(?=$|[\s;&|)<'"])`
+const NESTING = [
+  { pattern: new RegExp(`${COMMAND_WORD}(?:sh|bash|zsh|dash|ksh|fish|csh|tcsh)${COMMAND_END}`), why: 'it runs a shell' },
+  { pattern: new RegExp(`${COMMAND_WORD}(?:eval|xargs|exec|source|env\\s+-S)${COMMAND_END}`), why: 'it runs eval, xargs, exec or source' },
+  {
+    pattern: new RegExp(`${COMMAND_WORD}(?:python\\d*(?:\\.\\d+)?|node|nodejs|ruby|perl|php|deno|bun|lua|osascript|pwsh)(?:\\s+-\\S+)*?\\s+-(?:c|e|E|p|r|-eval|-print)(?=$|\\s)`),
+    why: 'it runs inline interpreter code',
+  },
+  { pattern: /<</, why: 'it feeds a heredoc or here-string' },
+  { pattern: /\$\(|`/, why: 'it runs command substitution' },
 ]
-const LEASE_PREFIX = '--force-with-lease'
-const SHORT_FORCE = /^-[a-zA-Z]*f[a-zA-Z]*$/
-const SHORT_DELETE = /^-[a-zA-Z]*d[a-zA-Z]*$/
+const GIT_CONFIG_ENV = /\bGIT_CONFIG_\w*/
+const REMOTE_CONFIG = /(?:^|[=\s'"])remote\./i
+const CONFIG_GLOBALS = new Set(['-c', '--config-env'])
 
 export function splitCommand(command) {
   const segments = []
   let words = []
   let word = null
   let quote = null
-  let depth = 0
 
   const startWord = () => {
     if (word === null) word = { text: '', computed: false }
@@ -45,20 +67,7 @@ export function splitCommand(command) {
       word.text += command[++i]
       continue
     }
-    if (ch === '$' && command[i + 1] === '(') {
-      startWord()
-      word.computed = true
-      depth++
-      word.text += '$('
-      i++
-      continue
-    }
-    if (depth > 0) {
-      if (ch === ')') depth--
-      word.text += ch
-      continue
-    }
-    if (ch === '`' || (ch === '$' && /[A-Za-z_{]/.test(command[i + 1] ?? ''))) {
+    if (ch === '`' || (ch === '$' && VARIABLE_START.test(command[i + 1] ?? '')) || (ch === '$' && command[i + 1] === '(')) {
       startWord()
       word.computed = true
       word.text += ch
@@ -98,76 +107,70 @@ function pushInvocation(words) {
   if (gitAt === -1) return null
   const pushAt = words.findIndex((w, k) => k > gitAt && w.text === 'push')
   if (pushAt === -1) return null
-  return { globals: words.slice(gitAt + 1, pushAt), args: words.slice(pushAt + 1) }
+  return { prefix: words.slice(0, gitAt), globals: words.slice(gitAt + 1, pushAt), args: words.slice(pushAt + 1) }
 }
 
-function configValues(globals) {
-  const values = []
+function configProblems(globals) {
+  const problems = []
   for (let k = 0; k < globals.length; k++) {
     const text = globals[k].text
-    if (text === '-c' && globals[k + 1]) values.push(globals[++k].text)
-    else if (text.startsWith('-c') && text.length > 2) values.push(text.slice(2))
+    const inline = ['-c', '--config-env='].find((flag) => text.startsWith(flag) && text !== '-c')
+    if (CONFIG_GLOBALS.has(text) || inline !== undefined) {
+      const value = inline === undefined ? (globals[++k]?.text ?? '') : text.slice(inline.length)
+      if (REMOTE_CONFIG.test(value) || text.startsWith('--config-env')) problems.push(`${text} ${value}`.trim() + ' changes remote or push config for this push')
+    }
   }
-  return values
+  return problems
 }
 
-export function hidesForcePush(command) {
-  return /\bgit\b/.test(command) && /\bpush\b/.test(command) && HIDDEN_CODE.test(command) && FORCE_INDICATOR.test(command)
+function optionProblem(text) {
+  if (ALLOWED_LONG_OPTIONS.has(text)) return null
+  const lease = text.match(PINNED_LEASE)
+  if (lease) return LITERAL_SHA.test(lease[2]) ? null : `the lease in ${text} is not a literal SHA`
+  if (text.startsWith('--force-with-lease')) return `${text} is not pinned to a SHA, so it trusts your remote-tracking ref, which any fetch moves`
+  if (/^-[a-zA-Z]+$/.test(text) && [...text.slice(1)].every((flag) => ALLOWED_SHORT_FLAGS.has(flag))) return null
+  return `${text} is not on the list of allowed push options`
 }
 
-function leaseProblem(word) {
-  const value = word.text.slice(LEASE_PREFIX.length)
-  if (value === '') return 'bare --force-with-lease compares against your remote-tracking ref, which any fetch moves'
-  if (word.computed) return `the lease SHA in ${word.text} is computed inside the command`
-  const [, expected] = value.slice(1).split(':')
-  if (expected === undefined) return `${word.text} has no SHA, so it still trusts your remote-tracking ref`
-  if (!LITERAL_SHA.test(expected)) return `the lease in ${word.text} is not a literal SHA`
+function refspecProblem(text) {
+  if (text.startsWith('+')) return `the refspec ${text} starts with +, which is a force push`
+  if (text.startsWith(':')) return `the refspec ${text} deletes a remote branch`
   return null
 }
 
+function nestingProblems(command) {
+  if (!/git/.test(command) || !/push/.test(command)) return []
+  return NESTING.filter((rule) => rule.pattern.test(command)).map((rule) => `the command mentions git push and ${rule.why}, so the hook cannot see what really runs`)
+}
+
 export function findForcePushes(command) {
-  const problems = []
-  if (hidesForcePush(command)) {
-    problems.push('the command runs nested code ($(...), backticks, eval or a shell -c) next to a git push with a force, mirror or delete option, so the hook cannot check it')
-  }
-  for (const words of splitCommand(command)) {
-    const push = pushInvocation(words)
-    if (push === null) continue
-    for (const value of configValues(push.globals)) {
-      for (const rule of DANGEROUS_CONFIG) if (rule.pattern.test(value)) problems.push(rule.why)
-    }
+  const problems = [...nestingProblems(command)]
+  const segments = splitCommand(command)
+  const pushes = segments.map(pushInvocation).filter((push) => push !== null)
+  if (pushes.length > 0 && GIT_CONFIG_ENV.test(command)) problems.push('GIT_CONFIG_* variables can change remote or push config for this push')
+  for (const push of pushes) {
+    problems.push(...configProblems(push.globals))
+    const computed = [...push.prefix, ...push.globals, ...push.args].filter((word) => word.computed)
+    for (const word of computed) problems.push(`${word.text} is computed when the command runs, so the hook cannot check it`)
     let options = true
     for (const word of push.args) {
+      if (word.computed) continue
       const text = word.text
       if (options && text === '--') {
         options = false
         continue
       }
-      if (options && (text === '--force' || SHORT_FORCE.test(text))) {
-        problems.push(`${text} overwrites the remote branch without checking what is there`)
-        continue
-      }
-      if (options && (text === '--mirror' || text === '--delete' || SHORT_DELETE.test(text))) {
-        problems.push(`${text} can delete or overwrite remote branches`)
-        continue
-      }
-      if (options && text.startsWith(LEASE_PREFIX) && !text.startsWith('--force-with-lease-')) {
-        const problem = leaseProblem(word)
-        if (problem) problems.push(problem)
-        continue
-      }
-      if (!options || !text.startsWith('-')) {
-        if (text.startsWith('+')) problems.push(`the refspec ${text} starts with +, which is a force push`)
-        else if (text.startsWith(':') && text.length > 1) problems.push(`the refspec ${text} deletes a remote branch`)
-      }
+      const problem = options && text.startsWith('-') && text.length > 1 ? optionProblem(text) : refspecProblem(text)
+      if (problem) problems.push(problem)
     }
   }
   return problems
 }
 
 export const HOW_TO_PUSH =
-  'Read the remote SHA yourself (git ls-remote origin <branch>), check it, then push with ' +
-  'git push --force-with-lease=<branch>:<that-sha> origin <branch>. ' +
+  'Plain pushes and -u, --tags, --follow-tags, --dry-run, -n, -q, -v, --no-verify, --porcelain and --atomic are allowed. ' +
+  'To force push, read the remote SHA yourself (git ls-remote origin <branch>), check it, then run ' +
+  'git push --force-with-lease=<branch>:<that-sha> origin <branch> as a plain command. ' +
   'If that is rejected, fetch and look at what landed before you try again.'
 
 function readInput() {
@@ -188,7 +191,7 @@ function main() {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         permissionDecision: 'deny',
-        permissionDecisionReason: `Blocked force push: ${problems.join('; ')}.\n\n${HOW_TO_PUSH}`,
+        permissionDecisionReason: `Blocked push: ${problems.join('; ')}.\n\n${HOW_TO_PUSH}`,
       },
     }),
   )
